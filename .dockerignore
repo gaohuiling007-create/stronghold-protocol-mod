@@ -12,8 +12,8 @@ logs
 docs/img
 # the image needs only the research JSON tables (server/sim/nodeData.js fallback), not the notes
 docs/research/*.md
-# game art is mounted at runtime or downloaded with --build-arg FETCH_ASSETS=1, never sent from the host
-public/assets
+# mod build: ship all game art/assets inside the image (they are committed to git, see .gitignore notes)
+# public/assets  <- intentionally NOT ignored for this mod deploy
 # generated from node_modules inside the image
 public/vendor
 scripts/service.env.cmd
