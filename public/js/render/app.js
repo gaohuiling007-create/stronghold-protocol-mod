@@ -124,6 +124,7 @@ import { layoutPen, penSignature } from './pen.js';
 import { IDENTITY, bossPrepField, tilesToDisp, leaderStand } from './prepfield.js';
 import { pickOnTile, pickBattle, hitRectAt, hitTiles } from './pick.js';
 import { promotionsOf } from './promote.js';
+import { skinFor } from '../ui/skins.js';
 
 const VENDOR = { pixi: '/vendor/pixi.min.js', spine: '/vendor/pixi-spine.js' };
 const PIECE_DIRS = new Set(['UP', 'RIGHT', 'DOWN', 'LEFT']);
@@ -283,6 +284,7 @@ export function renderInfo(u) {
   return {
     id: u.id, uid: u.uid ?? null, kind: u.kind || 'enemy', side: u.side === 'ally' ? 'ally' : 'enemy', ownerId: u.ownerId ?? null,
     defId: u.defId ?? null, name: u.name ?? '', tier: u.tier ?? 1, golden: !!u.golden, spine: u.spine ?? u.defId ?? null,
+    skin: u.skin ?? null,
     avatar: u.avatar ?? u.defId ?? null, x: Number(u.x) || 0, y: Number(u.y) || 0, facing: u.facing === -1 ? -1 : 1,
     maxHp: Number(u.maxHp) || 1, boss: !!u.boss, motion: u.motion,
     // deploy direction of allies (UnitInfo.dir, DESIGN §3): the model (Back for UP, mirrored for LEFT) and the
@@ -294,6 +296,10 @@ export function renderInfo(u) {
     // tap hands them to the detail card (a teammate's unit shows its owner's skill / module)
     skillIndex: Number.isInteger(u.skillIndex) ? u.skillIndex : undefined,
     moduleId: typeof u.moduleId === 'string' ? u.moduleId : undefined,
+    // the ally's equipped item ids (UnitInfo.items, DESIGN §16 / §21.11): the detail card needs them for a teammate's
+    // unit (resolveDetail `unitItems` → the read-only 装备 section and the 变形同构体 pairing chips); the owner's own
+    // unit takes its items from the piece instead, so only other players' boards ever read this field
+    items: Array.isArray(u.items) ? u.items.filter((x) => typeof x === 'string') : undefined,
   };
 }
 
@@ -358,9 +364,13 @@ function makeData(src) {
   };
 }
 
-const QUALITY_RES = { high: 2, medium: 1.5, low: 1 };
+const isMobile = typeof navigator !== 'undefined' && (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && !globalThis.matchMedia?.('(pointer: fine)').matches));
+
+// Mobile devices have constrained VRAM and thermal envelopes; capping mobile DPR to 2.0 (board to 1.5)
+// prevents GPU OOM and render process crashes while preserving sharp display on 1080p/1440p phones.
+const QUALITY_RES = isMobile ? { high: 2, medium: 1.5, low: 1 } : { high: 3, medium: 1.5, low: 1 };
 /** Pixel-ratio cap of the 3D board canvas per quality (its fill cost is the PBR board, not the sprites). */
-const BOARD_RES = { high: 2, medium: 1.25, low: 1 };
+const BOARD_RES = isMobile ? { high: 1.5, medium: 1.25, low: 1 } : { high: 3, medium: 1.25, low: 1 };
 
 /**
  * Before a renderer is destroyed: free its GL copies of every texture / buffer / geometry / framebuffer it
@@ -403,7 +413,7 @@ export async function createFieldView(host, options = {}) {
   const P = await ensurePixi();
   const assets = resolveAssets(opts.assets);
   const data = makeData(opts.data);
-  const settings = { damageNumbers: true, quality: 'high', ...(opts.settings || {}) };
+  const settings = { damageNumbers: true, quality: 'high', highRefresh: true, ...(opts.settings || {}) };
   // the 3D board (three.js + the official art) loads in parallel with everything else
   const boardPref = boardPreference(opts.board);
   const want3d = boardPref !== '2d' && webgl2Available(boardPref === '3d');
@@ -423,12 +433,43 @@ export async function createFieldView(host, options = {}) {
   const boardDpr = () => Math.min(globalThis.devicePixelRatio || 1, BOARD_RES[settings.quality] || 2);
   const s0 = size();
   const app = new P.Application({
-    // MSAA only where it pays: dense (DPR ≥ 1.5) screens are sharp enough without it and it would cost 4× the fill
+    // MSAA only where it pays: judge the ratio the canvas is actually painted at, not the screen's dpr — a capped
+    // resolution on a dense screen was sharp enough for neither.
     // transparent: the 3D board canvas shows through (the 2D board paints an opaque backdrop itself)
-    width: s0.width, height: s0.height, antialias: opts.antialias ?? (settings.quality === 'high' && (globalThis.devicePixelRatio || 1) < 1.5), backgroundColor: 0x0a0e0d, backgroundAlpha: 0,
+    width: s0.width, height: s0.height, antialias: opts.antialias ?? dpr() < 2, backgroundColor: 0x0a0e0d, backgroundAlpha: 0,
     resolution: dpr(), autoDensity: true, powerPreference: 'high-performance',
   });
+  let thermalThrottled = false;
+  let lastTouchTime = performance.now();
+  const getTargetFps = () => {
+    // 1. Explicitly off: strictly locked to 60 FPS across all phases
+    if (settings.highRefresh === false) return 60;
+    // 2. Hardware thermal protection: clamp to 60 FPS when device is warm
+    if (thermalThrottled) return 60;
+    // 3. Combat phase: heavy pathfinding, Spine skeletons, and 3D shadows; lock 60 FPS to prevent OOM / GPU freeze
+    if (mode === 'battle') return 60;
+    // 4. Idle power saving: if user is inactive for > 8s in prep/idle, throttle to 60 FPS
+    const idleSec = (performance.now() - lastTouchTime) / 1000;
+    if (idleSec > 8 && !dragState) return 60;
+    return 0; // 0 = unthrottled (120 FPS+ for buttery drag & formation prep)
+  };
+  const updateFpsLimit = () => {
+    if (app?.ticker) {
+      app.ticker.maxFPS = getTargetFps();
+    }
+  };
+  updateFpsLimit();
   const canvas = app.view;
+  const markTouch = () => {
+    lastTouchTime = performance.now();
+    updateFpsLimit();
+  };
+  canvas.addEventListener('pointerdown', markTouch, { passive: true });
+  canvas.addEventListener('pointermove', markTouch, { passive: true });
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    console.warn('[render] Pixi WebGL context lost; preventing default to allow recovery');
+  });
   canvas.style.display = 'block';
   canvas.style.width = '100%';
   canvas.style.height = '100%';
@@ -483,6 +524,17 @@ export async function createFieldView(host, options = {}) {
     const set = listeners.get(name);
     if (!set) return;
     for (const fn of [...set]) { try { fn(payload); } catch (err) { console.error(`[render] ${name} listener failed`, err); } }
+  };
+
+  /**
+   * Announce that a unit reached the board. The deploy voice line hangs off this event rather than off
+   * the manual drop handler, so it follows every route in: manual placement, combat auto-deploy, a
+   * merge's elite and a raid redeploy.
+   */
+  const announceDeploy = (v, e) => {
+    const info = v?.info;
+    if (!info || info.side === 'enemy') return;
+    emit('unitDeploy', { uid: e?.uid ?? null, defId: info.defId ?? null, chessId: e?.piece?.id ?? info.id ?? null });
   };
 
   let destroyed = false;
@@ -592,7 +644,7 @@ export async function createFieldView(host, options = {}) {
       host.insertBefore(c3, canvas);
       board3dCanvas = c3;
       const b = new BoardScene(THREE, pack, {
-        canvas: c3, antialias: settings.quality !== 'low' && (globalThis.devicePixelRatio || 1) < 2, shadows: settings.quality !== 'low',
+        canvas: c3, antialias: settings.quality !== 'low' && boardDpr() < 2, shadows: settings.quality !== 'low',
       });
       const sz = size();
       b.resize(sz.width, sz.height, boardDpr());
@@ -651,7 +703,10 @@ export async function createFieldView(host, options = {}) {
     }, delay);
   }
   if (want3d) {
-    const ready = Promise.all([threePromise, packPromise]).then(([THREE, pack]) => (THREE && pack ? enable3d(THREE, pack) : false), () => false);
+    const ready = Promise.all([threePromise, packPromise]).then(
+      ([THREE, pack]) => (THREE && pack ? enable3d(THREE, pack) : false),
+      (err) => { console.warn('[render] 3D board background load failed:', err); return false; },
+    );
     await withTimeout(ready, 6000);
   }
   // the official soft shadow sprite replaces the procedural one once loaded (may already be cached; asked again when the
@@ -878,9 +933,11 @@ export async function createFieldView(host, options = {}) {
       return { kind: 'token', side: 'ally', defId: piece.id, spine: rec?.assets?.spine || piece.id, avatar: rec?.assets?.avatar || piece.id, tier: piece.tier || 1, golden: false, dir };
     }
     const rec = data.chess(piece.id);
+    const baseId = rec?.baseId || piece.id;
     return {
       kind: 'op', side: 'ally', defId: piece.id,
       spine: rec?.assets?.spine || rec?.charId || null, avatar: rec?.assets?.avatar || rec?.charId || null,
+      skin: piece.skin ?? skinFor(baseId) ?? skinFor(piece.id) ?? null,
       tier: rec?.tier || piece.tier || 1, golden: !!(piece.golden || rec?.isGolden), dir,
     };
   }
@@ -956,7 +1013,7 @@ export async function createFieldView(host, options = {}) {
       const key = 'p:' + e.uid;
       e.key = key;
       const info = pieceInfo(e.piece, e.area);
-      const sig = `${info.kind}|${info.defId}|${info.golden ? 1 : 0}`;
+      const sig = `${info.kind}|${info.defId}|${info.golden ? 1 : 0}|${info.skin || ''}`;
       let v = views.get(key);
       if (v && v._sig !== sig) { dropView(key); v = null; }
       const w = slotWorld(e);
@@ -970,11 +1027,11 @@ export async function createFieldView(host, options = {}) {
         views.set(key, v);
         if (promoFrom.has(e.uid)) {
           // a merge's elite: on the tile of the deployed copy it replaced, or on its bench slot
-          if (e.area === 'board') v.onDeploy?.();
+          if (e.area === 'board') { v.onDeploy?.(); announceDeploy(v, e); }
           fx.promote(v, promoFrom.get(e.uid).filter((f) => Math.abs(f.x - w.x) + Math.abs(f.y - w.y) > 1e-3));
           promotions.push({ uid: e.uid, id: e.piece.id, area: e.area, row: e.row ?? null, col: e.col ?? null, idx: e.idx ?? null, copies: promoFrom.get(e.uid).length });
           if (promotions.length > 20) promotions.shift();
-        } else if (e.area === 'board' && prevBoard.size && !prevBoard.has(e.uid)) { v.onDeploy?.(); fx.deploy(v); }
+        } else if (e.area === 'board' && prevBoard.size && !prevBoard.has(e.uid)) { v.onDeploy?.(); announceDeploy(v, e); fx.deploy(v); }
         else if (before.length && (e.area === 'hand' || e.area === 'temp') && !before.some((g) => g.uid === e.uid)) fx.deploy(v);
       } else {
         const prevHome = v._home;
@@ -987,7 +1044,7 @@ export async function createFieldView(host, options = {}) {
           pending.delete(key);
           if (moved || Math.abs(v.x - w.x) + Math.abs(v.y - w.y) > 1e-3) v._tween = { fx: v.x, fy: v.y, fz: v.z, tx: w.x, ty: w.y, tz: w.z, t: 0 };
           v.lift = 0;
-          if (e.area === 'board' && !prevBoard.has(e.uid) && v.onDeploy) { v.onDeploy(); fx.deploy(v); }
+          if (e.area === 'board' && !prevBoard.has(e.uid) && v.onDeploy) { v.onDeploy(); announceDeploy(v, e); fx.deploy(v); }
         }
       }
       v._home = w;
@@ -1022,6 +1079,8 @@ export async function createFieldView(host, options = {}) {
 
   function enterPrepMode() {
     mode = 'prep';
+    lastTouchTime = performance.now();
+    updateFpsLimit();
     held.clear();
     clearViews();
     infos.clear();
@@ -1422,6 +1481,7 @@ export async function createFieldView(host, options = {}) {
     clearHl();
     renderT0Battle = null;
     mode = 'battle';
+    updateFpsLimit();
     const rect = meta.rect ? normRect(meta.rect) : (meta.kind === 'boss' || meta.kind === 'hidden' ? { ...GEO.BOSS_RECT } : meta.kind === 'unite' ? { ...GEO.UNITE_RECT } : { ...GEO.NORMAL_RECT });
     // prep: true = a read-only scouting board (a teammate's lineup during prep): prep-style pieces, no bars
     battleMeta = { fieldId: meta.fieldId ?? null, kind: meta.kind || 'normal', rect, stageId: meta.stageId ?? null, prep: meta.prep === true };
@@ -1445,12 +1505,29 @@ export async function createFieldView(host, options = {}) {
     return info;
   }
 
+  // a hand item on a scouted prep board (UnitInfo kind 'item'): the plate's icon and colour resolve client-side,
+  // exactly like the own prep bench (pieceInfo)
+  function scoutItemInfo(info) {
+    const rec = data.item(info.defId);
+    const tier = rec?.tier || info.tier || 1;
+    return { ...info,
+      icon: assets.itemIcon ? assets.itemIcon(rec ? { trapId: rec.trapId, iconId: rec.iconId } : info.defId) : null,
+      color: (info.golden || rec?.isGolden) ? 0xffc600 : TIER_COLORS[tier] || TIER_COLORS[1] };
+  }
+
   function battleView(id) {
     let v = views.get(id);
     if (v) return v;
     const info = infos.get(id);
     if (!info || gone.has(id)) return null;
-    v = info.kind === 'device' ? new DeviceView(ctx, info) : new UnitView(ctx, info, { prep: !!battleMeta?.prep && info.side === 'ally' });
+    v = info.kind === 'device' ? new DeviceView(ctx, info)
+      : info.kind === 'item' ? new ItemView(ctx, scoutItemInfo(info))
+      : new UnitView(ctx, info, { prep: !!battleMeta?.prep && info.side === 'ally' });
+    // a teammate's operator shows its equipped items like the own prep bench does (item pips; user playtest #2:
+    // at the unit, not only in the detail card) — prep surfaces only, the battle HUD stays as it is
+    if (v.setItems && battleMeta?.prep && Array.isArray(info.items) && info.items.length) {
+      v.setItems(info.items.map((it) => { const r = data.item(it); return assets.itemIcon ? assets.itemIcon(r ? { trapId: r.trapId, iconId: r.iconId } : it) : null; }));
+    }
     v.setWorld(info.x, info.y, 0);
     v._seen = false;
     v._born = performance.now();
@@ -1521,12 +1598,18 @@ export async function createFieldView(host, options = {}) {
       case 'deploy': {
         gone.delete(e[1]);
         const v = battleView(e[1]);
-        if (v) { v.onDeploy?.(); if (v.info?.kind !== 'device') fx.deploy(v); }
+        const isInitial = !!(e[2]?.initial || (typeof e[2] === 'object' && e[2]?.initial));
+        if (v) {
+          v.onDeploy?.();
+          if (!isInitial) announceDeploy(v, e);
+          if (v.info?.kind !== 'device' && !isInitial) fx.deploy(v);
+        }
         break;
       }
       case 'atk': {
         const src = views.get(e[1]) || battleView(e[1]);
         const tgt = views.get(e[2]) || battleView(e[2]);
+        if (tgt && !tgt.alive) break;
         // chain / chainHeal bounces: the "source" is the previous target of the bounce, not an attacker
         if (src && !CHAIN_KINDS.has(e[3])) src.onAttack?.(tgt, now, e[3]);
         if (e[3] === 'none' || !e[3]) { if (tgt && src) meleePending.set(tgt.id, { src, t: now }); }
@@ -1548,7 +1631,15 @@ export async function createFieldView(host, options = {}) {
       case 'die': {
         const v = views.get(e[1]);
         const used = consumedIds.delete(e[1]);
-        if (v && v.alive) { v.die(e[2] === FORCED_EXIT); if (showsDeathFx(v.info, used, e[2])) fx.death(v); }
+        if (v && v.alive) {
+          v.die(e[2] === FORCED_EXIT);
+          if (showsDeathFx(v.info, used, e[2])) fx.death(v);
+          for (const u of views.values()) {
+            if (u && u !== v && u.lastTargetId === v.id) {
+              u.finishAttack?.();
+            }
+          }
+        }
         break;
       }
       case 'leak': {
@@ -1719,13 +1810,21 @@ export async function createFieldView(host, options = {}) {
     // a struggling device (load level ≥ 2) may refresh a big crowd more rarely (10 Hz at worst)
     return Math.min(loadLevel >= 2 ? 6 : 4, Math.max(2, Math.ceil(n / (base * 0.75))));
   }
+  let lastFrameTime = 0;
   function frame() {
     if (destroyed) return;
     const now = performance.now();
+    const targetFps = getTargetFps();
+    if (targetFps > 0) {
+      const minInterval = (1000 / targetFps) - 2.0;
+      if ((now - lastFrameTime) < minInterval) return;
+    }
+    lastFrameTime = now;
     try { frameBody(now); } finally { cpuMs = cpuMs * 0.9 + (performance.now() - now) * 0.1; }
   }
   function frameBody(now) {
     frameNo++;
+    if (frameNo % 60 === 1) updateFpsLimit();
     if (frameNo % 30 === 1) {
       impInterval = pickImpostorInterval(); clipAllowed = pickClipping();
       culledCount = 0;
@@ -1940,7 +2039,17 @@ export async function createFieldView(host, options = {}) {
       const q = settings.quality;
       if (typeof s.damageNumbers === 'boolean') settings.damageNumbers = s.damageNumbers;
       if (s.quality === 'high' || s.quality === 'medium' || s.quality === 'low') settings.quality = s.quality;
+      if (typeof s.highRefresh === 'boolean') {
+        settings.highRefresh = s.highRefresh;
+        updateFpsLimit();
+      }
       if (q !== settings.quality) { board3d?.setQuality?.(settings.quality); resize(); }
+    },
+    setThermalThrottle(on) {
+      if (destroyed) return false;
+      thermalThrottled = !!on;
+      updateFpsLimit();
+      return true;
     },
     resize,
     /** Dev / settings: switch the board layer ('3d' loads three.js + the art when available; '2d' = atlas board). */

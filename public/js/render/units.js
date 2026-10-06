@@ -248,42 +248,6 @@ export const FORMS = Object.freeze({
   }),
   enemy_1172_dugago: STATUE,
   enemy_1172_dugago_2: STATUE,
-  // 结城理 (the MOD dollkeeper, sim kits/tier3.js `chess_char_4217_makoto`): his <替身> state summons one of his two
-  // 人格面具 — the clip sets of his OWN skeleton (`Doll_Skill_*`, data/assets.json anims). 俄耳甫斯 (S1) / 塔纳托斯
-  // (S2) have an attack loop, 塔纳托斯' S3 form is 近战 with an A/B pair (P1) and 俄耳甫斯' is a support channel (P2).
-  char_4217_makoto: Object.freeze({
-    doll1: Object.freeze({
-      change: 'Doll_Skill_1_SwitchIn', end: 'Doll_Skill_1_SwitchOut',
-      roles: Object.freeze({
-        idle: 'Doll_Skill_1_Idle', deploy: 'Doll_Skill_1_Idle', die: 'Doll_Skill_1_Die', move: loop('Doll_Skill_1_Idle'),
-        stun: loop('Doll_Skill_1_Stun'), attack: loop('Doll_Skill_1_Attack', 'attackAny'),
-        skill: Object.freeze({ begin: null, loop: 'Doll_Skill_1_Attack', end: null, via: 'attack', index: 0, idle: null }),
-      }),
-    }),
-    doll2: Object.freeze({
-      change: 'Doll_Skill_2_SwitchIn', end: 'Doll_Skill_2_SwitchOut',
-      roles: Object.freeze({
-        idle: 'Doll_Skill_2_Loop', deploy: 'Doll_Skill_2_Loop', die: 'Doll_Skill_2_Die', move: loop('Doll_Skill_2_Loop'),
-        stun: loop('Doll_Skill_2_Stun'), attack: loop('Doll_Skill_2_Loop', 'attackAny'),
-        skill: Object.freeze({ begin: null, loop: 'Doll_Skill_2_Loop', end: null, via: 'attack', index: 1, idle: null }),
-      }),
-    }),
-    doll3p1: Object.freeze({
-      change: 'Doll_Skill_3_P1_SwitchIn', end: 'Doll_Skill_3_P1toP2_ChangeBegin', next: 'doll3p2',
-      roles: Object.freeze({
-        idle: 'Doll_Skill_3_P1_Idle', deploy: 'Doll_Skill_3_P1_Idle', die: 'Doll_Skill_3_P1_SwitchOut', move: loop('Doll_Skill_3_P1_Idle'),
-        stun: loop('Doll_Skill_3_P1_Stun'), attack: loop('Doll_Skill_3_P1_Attack_A', 'attackAny'),
-        skill: Object.freeze({ begin: null, loop: 'Doll_Skill_3_P1_Attack_A', end: null, via: 'attack', index: 2, idle: null }),
-      }),
-    }),
-    doll3p2: Object.freeze({
-      change: 'Doll_Skill_3_P1toP2_ChangeEnd', end: 'Doll_Skill_3_P2_SwitchOut',
-      roles: Object.freeze({
-        idle: 'Doll_Skill_3_P2_Loop', deploy: 'Doll_Skill_3_P2_Loop', die: 'Doll_Skill_3_P2_Die', move: loop('Doll_Skill_3_P2_Loop'),
-        stun: loop('Doll_Skill_3_P2_Stun'), attack: null, skill: null,
-      }),
-    }),
-  }),
 });
 
 /**
@@ -444,8 +408,9 @@ export class UnitView {
   _loadPicture() {
     const a = this.ctx.assets;
     // (an ICE_TOKENS unit takes no picture: the token fallback would be its owner's face — assets.js tokenAvatarUrl)
-    const url = ICE_TOKENS.has(this.info.defId) ? null : a && (a.picture ? a.picture(this.info.avatar) || a.picture(this.info.defId) || a.picture(this.info.spine) : null);
-    this._pic = { key: String(this.info.avatar || this.info.defId || 'unknown'), color: this._frameColor(), img: null, state: 'none', shown: null, t0: nowMs() };
+    const skinOpt = this.info.skin ? { skin: this.info.skin } : undefined;
+    const url = ICE_TOKENS.has(this.info.defId) ? null : a && (a.picture ? a.picture(this.info.avatar, skinOpt) || a.picture(this.info.defId, skinOpt) || a.picture(this.info.spine, skinOpt) : null);
+    this._pic = { key: String(this.info.avatar || this.info.defId || 'unknown') + (this.info.skin ? `|${this.info.skin}` : ''), color: this._frameColor(), img: null, state: 'none', shown: null, t0: nowMs() };
     if (!url || !a.image) return;
     const cached = typeof a.imageNow === 'function' ? a.imageNow(url) : null;
     if (cached) { this._pic.img = cached; this._pic.state = 'img'; return; }
@@ -475,7 +440,7 @@ export class UnitView {
     // Front/Back rule (research 07 §5.5 / 09 §1.2): Front facing right/down (mirrored for left), Back facing up — while
     // standing (a knocked-out operator lies with the model that has a fall: _wantsBack).
     const back = this._wantsBack();
-    const entry = id ? a.spineEntry(id, { back }) : null;
+    const entry = id ? a.spineEntry(id, { back, skin: this.info.skin }) : null;
     if (!entry || this.ctx.settings?.quality === 'low' && this.isEnemy && !this.isBoss && this.ctx.crowded?.()) return;
     this.entryBack = back;
     this._acquireSpine(entry, id, retry);
@@ -719,8 +684,8 @@ export class UnitView {
   _wantsBack() {
     const a = this.ctx.assets;
     const id = this.info.spine || this.info.defId;
-    if (this.isEnemy || this.dir !== 'UP' || !id || !a || typeof a.hasBack !== 'function' || !a.hasBack(id)) return false;
-    return this.alive || dieClipDur(typeof a.spineEntry === 'function' ? a.spineEntry(id, { back: true }) : null) > 0;
+    if (this.isEnemy || this.dir !== 'UP' || !id || !a || typeof a.hasBack !== 'function' || !a.hasBack(id, this.info.skin)) return false;
+    return this.alive || dieClipDur(typeof a.spineEntry === 'function' ? a.spineEntry(id, { back: true, skin: this.info.skin }) : null) > 0;
   }
 
   /**
@@ -772,6 +737,7 @@ export class UnitView {
   /** An attack was made (b.ev 'atk'). `target` = view or null. */
   onAttack(target, now, kind) {
     if (!this.alive) return;
+    this.lastTargetId = target?.id ?? null;
     // a one-off cast (PROJ[kind].once: 暴鸰's bomb drop) is no attack rhythm: its clip plays once at its own speed
     const once = !!PROJ[kind]?.once;
     if (!once) {
@@ -794,6 +760,11 @@ export class UnitView {
     this.lunge = 1;
     if (this.actor) this.actor.attack(this.atkInterval, once); // game seconds: the actor's clock runs in game time
     if (this.imp) this.imp.dirty = true;
+  }
+
+  finishAttack() {
+    this.lastTargetId = null;
+    if (this.actor?.finishAttack) this.actor.finishAttack();
   }
 
   /**
