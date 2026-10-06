@@ -1,0 +1,41 @@
+# --- dependencies & generated client libs -------------------------------------------------------
+node_modules/
+# copied from node_modules by tools/vendor.mjs (postinstall); never commit third-party builds
+public/vendor/
+
+# --- game assets: MOD BUILD INCLUDES them so the modded chars render on Render -----------------
+# (upstream .gitignore excludes public/assets/ and public/fonts/; for this personal mod deploy we
+#  commit them so the Docker build has everything it needs without re-running fetch-assets.mjs.)
+# public/assets/   <- intentionally NOT ignored for this mod build
+# public/fonts/   <- intentionally NOT ignored for this mod build
+# data/local-assets.json <- intentionally NOT ignored; needed for local-extracted mod chars
+# download caches, upstream tables, ledgers, reports, setup state
+.cache/
+
+# --- mod-only scratch / debug scripts (not needed at runtime) ----------------------------------
+scratch/
+
+# --- Python (optional local-client extraction) ----------------------------------------------------
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+
+# --- tests & logs ----------------------------------------------------------------------------------
+test/e2e/out/
+logs/
+*.log
+
+# --- per-machine config (scripts/install-service-windows.ps1) ------------------------------------
+scripts/service.env.cmd
+.env
+.env.*
+
+# --- OS / editor clutter ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/
+.claude/
