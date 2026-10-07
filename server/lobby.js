@@ -177,7 +177,7 @@ export class Room {
       difficulty: this.difficulty,
       inMatch: !!this.match,
       seats: this.seats.map((s) => (s
-        ? { seat: s.seat, playerId: s.playerId, name: s.name, isBot: s.isBot, ready: s.ready, connected: s.connected && !s.left }
+        ? { seat: s.seat, playerId: s.playerId, name: s.name, isBot: s.isBot, ready: s.ready, connected: s.connected && !s.left, skins: s.skins || null }
         : null)),
       spectators: this.spectators.map((s) => ({ playerId: s.playerId, name: s.name, connected: s.connected })),
     };
@@ -289,6 +289,7 @@ export class Lobby {
       case 'room.kick': return this.kick(session, msg);
       case 'room.start': return this.start(session);
       case 'room.loadout': return this.loadout(session, msg);
+      case 'room.skins': return this.skins(session, msg);
       case 'room.spectate': return this.spectate(session, msg);
       case 'room.removeSpectator': return this.removeSpectator(session, msg);
       default:
@@ -572,6 +573,22 @@ export class Lobby {
     if (r && typeof r === 'object' && r.error) {
       return fail(isErrCode(r.error) ? r.error : ERR.INTERNAL, typeof r.detail === 'string' ? r.detail : undefined);
     }
+    return OK;
+  }
+
+  /** room.skins { skins: { chessId: skinId } } — per-player skin picks, mirrored to the room so others see them. */
+  skins(session, { skins }) {
+    if (!skins || typeof skins !== 'object') return fail(ERR.BAD_MSG, 'skins must be an object');
+    const clean = {};
+    for (const [k, v] of Object.entries(skins)) {
+      if (typeof k === 'string' && (v === null || typeof v === 'string')) clean[k] = v;
+    }
+    session.skins = clean;
+    const room = this.roomOf(session);
+    if (!room) return OK;
+    const seat = room.seatOf(session.playerId);
+    if (seat) seat.skins = clean;
+    this.broadcastState(room);
     return OK;
   }
 
