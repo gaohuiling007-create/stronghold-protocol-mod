@@ -224,9 +224,7 @@ export const FX_KINDS = Object.freeze({
   // 炎佑 祛恶之焰: a continuous jet from the dragon (`id`) onto its locked target (`target`) + a burning disc (_flame)
   yanyouFlame: { a: 'flame', c: 0xff8a3d, r: 1 },
   // states
-  // 起飞: `takeoffKun` is the 鲲 band's own, bigger one (the operator that reached the devour count) — see its case
-  takeoff: { a: 'lift', c: 0xcfe0ff }, takeoffKun: { a: 'takeoffKun', c: 0x8fe6ff },
-  levitate: { a: 'lift', c: 0xcfe0ff }, weightless: { a: 'lift', c: 0xcfe0ff },
+  takeoff: { a: 'lift', c: 0xcfe0ff }, levitate: { a: 'lift', c: 0xcfe0ff }, weightless: { a: 'lift', c: 0xcfe0ff },
   sleep: { a: 'sleep', c: 0xa8b6ff }, crit: { a: 'crit', c: 0xffe066 },
   dodge: { a: 'dodge', c: 0xffffff }, riposte: { a: 'counter', c: 0xffd9a0 }, counter: { a: 'counter', c: 0xffd9a0 }, block: { a: 'counter', c: 0xdfe8ff },
   thorns: { a: 'counter', c: 0xff9aa6 }, downed: { a: 'down', c: 0xbfeee2 }, stone: { a: 'down', c: 0xc0b8a8, smoke: 0x5a5448 },
@@ -1862,43 +1860,6 @@ export class FxSystem {
         this.ring(at.x, at.y, at.z, 0.2, 0.8, col, 0.5);
         for (let i = 0; i < (this.quality === 'low' ? 3 : 7); i++) {
           this.particle('streak', g.x + (Math.random() - 0.5) * g.s * 0.6, g.y - g.s * Math.random() * 0.4, { tint: col, vy: -g.s * 1.8, life: 0.4, s0: g.s / 128 * 0.4, s1: g.s / 128 * 0.2, a0: 0.8, a1: 0, rot: -Math.PI / 2, sx: 1 });
-        }
-        break;
-      }
-      case 'takeoffKun': {
-        // 化鲲为鹏's 起飞 on the 阿戈尔 that reached the devour count: the generic `lift` shares its 0.4-0.5 s burst with
-        // 浮空 / 失重 and lands in the same instant as the three 复活 summons, where it read as nothing. This one is
-        // built for the once-per-battle moment and outlives it: a big ground shockwave + hex, a white-hot up-draught
-        // (pillar, the `skill()` composition), an upward streak column, a bright core and rising embers. Team-neutral
-        // cyan, so it reads as the band's own event and not as a heal (green) or a skill activation (gold).
-        const g = this._proj(at.x, at.y, at.z, this._g);
-        const s = g.s;
-        const v = at.v;
-        const up = (dy) => g.y - s * dy;   // a screen offset for one tile of height
-        const low = this.quality === 'low';
-        this.ring(at.x, at.y, at.z, 0.12, 2.1, 0xa8ecff, 0.6, 'shock');
-        this.ring(at.x, at.y, at.z, 0.3, 1.5, col, 0.75, 'hex');
-        this.particle('pillar', g.x, g.y, { tint: col, life: 0.85, s0: s / 64 * 1.1, s1: s / 64 * 1.35, a0: 0.9, a1: 0, sx: 0.8, ay: 1 });
-        this.particle('pillar', g.x, g.y, { tint: 0xffffff, life: 0.5, s0: s / 64 * 0.95, s1: s / 64 * 1.2, a0: 0.95, a1: 0, sx: 0.26, ay: 1 });
-        this.particle('flare', g.x, up(0.9), { tint: 0xeaffff, life: 0.35, s0: s / 128 * 1.7, s1: s / 128 * 0.7, a0: 1, a1: 0, rot: Math.random() });
-        this.particle('glow', g.x, up(0.5), { tint: col, life: 0.6, s0: s / 128 * 1.0, s1: s / 128 * 2.6, a0: 0.85, a1: 0 });
-        this.burst(g.x, up(0.4), s, low ? 5 : 12, 0xdff6ff, { speed: 1.5, up: 2.2, life: 0.8, tex: 'dot', size: 0.34 });
-        // the up-draught: an outward fan of chevrons climbing away from the feet
-        for (let i = 0; i < (low ? 6 : 14); i++) {
-          const side = (Math.random() - 0.5) * s * 1.5;
-          this.particle('chevron', g.x + side, up(Math.random() * 2.2), {
-            tint: i % 3 === 0 ? 0xffffff : col, vy: -s * (1.1 + Math.random() * 0.9), vx: side * 0.2,
-            life: 0.9 + Math.random() * 0.5, s0: s / 64 * 0.26, s1: s / 64 * 0.13, a0: 0.95, a1: 0, fadeIn: 0.06,
-          });
-        }
-        // rising embers that stay on the operator (the view follows it): a longer, quieter tail than the burst
-        if (v) {
-          for (let i = 0; i < (low ? 3 : 8); i++) {
-            this.particle('soft', g.x + (Math.random() - 0.5) * s * 0.5, up(0.3 + Math.random() * 1.6), {
-              tint: 0x9fe8ff, vy: -s * (0.5 + Math.random() * 0.5), life: 1.3 + Math.random() * 0.6,
-              s0: s / 128 * 0.3, s1: s / 128 * 0.08, a0: 0.6, a1: 0,
-            });
-          }
         }
         break;
       }

@@ -68,7 +68,7 @@ import { PHASE, GEO } from '../../../shared/constants.js';
 import { fxForm } from '../../../shared/protocol.js';
 import { html, Spinner, PhaseBanner, Icon, Button, MicroLabel, confirmDialog, closeAllDialogs, useTicker } from '../ui/components.js';
 import { useGameData, GIcon } from '../ui/gameComponents.js';
-import { useFieldView } from '../ui/fieldHost.js';
+import { useFieldView, lastMountError } from '../ui/fieldHost.js';
 import { TopBar, liveLp, ownLeaks, uniteRemaining, tempInfo, tempReadyReason } from '../ui/hud.js';
 import { BondStrip, BondPopup } from '../ui/bondStrip.js';
 import { TeamPanel } from '../ui/teamPanel.js';
@@ -94,9 +94,8 @@ import { pieceTile } from '../render/drag.js';
 import {
   phaseMode, phaseBanner, isCombatPhase, showDeadPill, isBossPhase, placementContext, canPlace, boardTargets, dropIntent,
   snapHud, activeBubbles, shortcutFor, shortcutBlocked, closesOnFieldPress, phaseTotalSeconds, homeFieldId, ownFieldId, normalizeSp, sortedPlayers,
-  terrainInfo,
   countdownState, shopBlockReason, stageOverrides, effectiveStage, watchTarget, dropFailureReason,
-  previewEnemyKey, prepCamera, prepCameraFor, foldCamera, deployFieldOf, fieldTile, panelSide, panelSlots, bondPopupPlace, chessLoadout, unitLoadout,
+  previewEnemyKey, prepCamera, prepCameraFor, foldCamera, deployFieldOf, panelSide, panelSlots, bondPopupPlace, chessLoadout, unitLoadout,
   mergeTarget, modeOffBonds, readyFundsPrompt, ownerBandId,
 } from '../ui/gameLogic.js';
 import { toast } from '../ui/toasts.js';
@@ -109,7 +108,7 @@ import { battleRunner } from '../battle/runner.js';
 import { isClientCombat, observeTarget, teammateProgress, cameraLayers, layerCamera, sidesOf, resumedWatch } from '../battle/observe.js';
 import { screenStrip, playerBonds, playerLayer, detailBondOwner, toggleBond, popupView } from '../ui/watchBonds.js';
 import { data, localAsset, getMode } from '../data.js';
-import { audio, resultSpeaker, resultVoiceSlot } from '../audio.js';
+import { audio, voiceKey, resultSpeaker, resultVoiceSlot } from '../audio.js';
 import { useDocClass, FullscreenButton } from '../ui/device.js';
 
 const cx = (...p) => p.flat().filter(Boolean).join(' ');
@@ -201,7 +200,6 @@ function MatchScreen() {
   const [watchWho, setWatchWho] = useState(null);        // { fieldId, playerId }: the teammate picked with 前往查看
   const [drawer, setDrawer] = useState(null);            // 'enemies' | 'info' | null
   const [bondOpen, setBondOpen] = useState(null);        // { id, ownerId, from }: the bond popup and whose bond it shows
-  const [bondsCollapsed, setBondsCollapsed] = useState(false);
   const [detail, setDetail] = useState(null);            // detail target
   const [collapsed, setCollapsed] = useState(false);
   const [rewardMin, setRewardMin] = useState(false);
@@ -369,15 +367,6 @@ function MatchScreen() {
     const st = ownView ? ownStage : baseStage;
     if (st) view.setStage(st);
   }, [view, ownView, ownStage, baseStage]);
-  // the stage behind the board ON SCREEN — the own one (机变 overrides applied) or, while watching a teammate, the plain
-  // one — and how a tapped BOARD tile maps to it (GitHub issue #184: tileClick → gameLogic.terrainInfo). Everywhere but a
-  // boss-prep board the two spaces are the same: a 最终攻势 / 隐秘核心 battle renders the stage's own rows (GEO.BOSS_RECT),
-  // 联防 / normal rects are stage rows; the boss PREP draws the player's half (stage rows 2–5) as board rows 9–12
-  // (render/prepfield.js toDisp), which is exactly gameLogic.fieldTile.
-  live.current.terrainStage = ownView ? ownStage : baseStage;
-  live.current.terrainTile = showPrep && (deployField === 'bossL' || deployField === 'bossR')
-    ? (row, col) => fieldTile(deployField, row, col)
-    : (row, col) => [row, col];
   const staleFieldRef = useRef(null);
   const enteredFieldRef = useRef(null);
   const pressSel = useRef(null);                         // the selected piece when the current field press began
@@ -449,7 +438,7 @@ function MatchScreen() {
     }
     if (earlySnap) {
       view.pushSnapshot(earlySnap);
-      hudRef.current = snapHud(earlySnap);
+      hudRef.current = snapHud(earlySnap, myId);
       setHud(hudRef.current);
     }
   }, [view, showPrep, priv, editable, field, combat, mode, watchingOther, watching, holdSeq]);
@@ -482,7 +471,7 @@ function MatchScreen() {
         for (const t of snap.units) if (Array.isArray(t)) mp.set(t[0], t);
         snapUnitsRef.current = mp;
       }
-      hudRef.current = snapHud(snap);
+      hudRef.current = snapHud(snap, myId);
       const dt = performance.now() - last;
       if (dt >= HUD_HZ_MS) flush();
       else if (!pending) pending = setTimeout(flush, HUD_HZ_MS - dt);
@@ -504,7 +493,6 @@ function MatchScreen() {
       audio.handleBattleEvents(msg.ev);
     };
     // 干员语音 (结算): the own battle's result just came in — the operator's line depends on how it went
-    // (完美作战 ⇒ 3星结束行动, 绝境 / 终极 ⇒ 完成高难行动, 有漏怪 ⇒ 非3星结束行动, 一个没杀 ⇒ 行动失败)
     const onResult = (msg) => {
       try {
         if (!msg || !msg.result) return;
@@ -512,10 +500,7 @@ function MatchScreen() {
         const pid = st.me?.playerId;
         const mine = (pid && msg.result.perPlayer && msg.result.perPlayer[pid]) || null;
         const diff = st.match?.public?.difficulty;
-        // the speaker comes from THIS battle's own field (`mine.unitsEnd`), not from the field on screen: watching a
-        // teammate used to make THEIR operator say the viewer's line (review on #73). unitsEnd names chess ids: the
-        // chess record gives the operator whose voice bank speaks
-        const charId = resultSpeaker(mine, Math.random, (id) => data.lookup('chess', id)?.charId ?? null);
+        const charId = resultSpeaker(mine);
         if (!charId) return;
         audio.voice(charId, resultVoiceSlot({
           perfect: !!(mine?.perfect),
@@ -587,7 +572,8 @@ function MatchScreen() {
     let asked = null;
     try { asked = new URLSearchParams(globalThis.location?.search || '').get('render'); } catch { asked = null; }
     if (asked === 'fallback' || globalThis.__SP_RENDER__ === 'fallback') return;
-    toast('当前设备无法启用 3D / WebGL 渲染，已切换为简化视图（功能不受影响）', 'info', { ttl: 5000 });
+    const reason = lastMountError ? ` (${lastMountError.message || lastMountError})` : '';
+    toast(`当前设备无法启用 3D / WebGL 渲染${reason}，已切换为简化视图（功能不受影响）`, 'info', { ttl: 8000 });
   }, [viewKind]);
 
   // phase changes: banners, sounds, resets
@@ -862,6 +848,14 @@ function MatchScreen() {
         }
         await runIntent(intent);
       }),
+      // The deploy voice line hangs off the unit actually reaching the board (render/app.js
+      // announceDeploy) instead of off the manual drop, so combat auto-deploy, a merge's elite and a
+      // raid redeploy speak too — it used to sound only when the player tapped a piece into place.
+      view.on('unitDeploy', (e) => {
+        try { audio.deploy?.(e, gd); } catch { /* ignore */ }
+        const vk = voiceKey(e?.defId || e?.chessId, gd);
+        if (vk) audio.voice(vk, 'place');
+      }),
       view.on('pieceDragEnd', (e) => {
         // a cancelled drag (no pieceDrop) must not leave the highlights behind; a release on a tile that takes nothing
         // (the drag controller found no legal target there) says why
@@ -881,6 +875,8 @@ function MatchScreen() {
       view.on('pieceClick', (e) => {
         if (!e) return;
         audio.sfx('click', { volume: 0.4 });
+        const vk = voiceKey(e.piece || (e.uid != null ? live.current.placeCtx?.pieces.get(e.uid)?.piece : null) || e.unit, gd);
+        if (vk) audio.voice(vk, 'select');
         // an enemy of the preview pen (research 09 §2.2 "Intel": tap it for its detail card)
         const penKey = previewEnemyKey(e);
         if (penKey) { setDetail({ kind: 'enemy', id: penKey }); return; }
@@ -895,19 +891,6 @@ function MatchScreen() {
         pressSel.current = null;
         setSel(wasSel ? null : { uid: e.uid });
         if (wasSel) setDetail((d) => (d?.kind === 'piece' && d.uid === e.uid ? null : d));
-      }),
-      // a tap on the ground itself: a special terrain tile explains itself (GitHub issue #184 「建议加入对于特殊地形的单击
-      // 信息提示」) — 活性源石 / 沼泽 / 排气格栅 / 深水区 / 红蓝门 / 传送, with the numbers of the stage behind the board.
-      // An ordinary tile (road / floor / wall) says nothing, so the press keeps its other meanings (deselect, close).
-      view.on('tileClick', (t) => {
-        if (!t || !Number.isInteger(t.row) || !Number.isInteger(t.col)) return;
-        const L = live.current;
-        const [row, col] = L.terrainTile(t.row, t.col);
-        const info = terrainInfo(L.terrainStage, row, col);
-        if (!info) return;
-        audio.sfx('click', { volume: 0.4 });
-        setSel(null);
-        setDetail({ kind: 'terrain', terrain: info });
       }),
     ];
     return () => { moveOff?.(); for (const off of offs) { try { off?.(); } catch { /* ignore */ } } };
@@ -968,6 +951,19 @@ function MatchScreen() {
     return () => host.removeEventListener('pointerdown', onDown, true);
   }, []);
 
+  // click outside detail panel on non-interactive backdrop/hud space closes the panel
+  useEffect(() => {
+    const onDocDown = (e) => {
+      if (!live.current.detail) return;
+      if (e.target.closest('.dpanel, .uframe, .scard, .lvcard, .toolbtn, .funds, .shopbar-tab, .fwheel, .bpop, .modal, .edrawer, .gm__corner, .gtop')) {
+        return;
+      }
+      setDetail(null);
+    };
+    window.addEventListener('pointerdown', onDocDown, true);
+    return () => window.removeEventListener('pointerdown', onDocDown, true);
+  }, []);
+
   // ---- direction step (research 09 §1.2) and the selected piece's underframe ------------------------------------
   // DESIGN §16: previews show the range the unit fights with under the player's loadout (an elite's module grid)
   const lookups = useMemo(() => ({ getChess: gd.chess, getToken: gd.token, getItem: gd.item,
@@ -996,6 +992,7 @@ function MatchScreen() {
     const f = live.current.facing;
     if (!f) return;
     setFacing(null);
+    audio.sfx('click', { volume: 0.5 });
     const intent = facingIntent(f.piece, { row: f.row, col: f.col }, dir);
     heldRef.current.set(f.uid, { row: f.row, col: f.col, t: Date.now() });
     const ok = intent.t === 'g.art'
@@ -1005,6 +1002,10 @@ function MatchScreen() {
       if (f.piece.kind !== 'item') setPieceDir(view, f.uid, pieceDir(f.piece));
       releaseHold(f.uid);
       return;
+    }
+    if (f.piece && f.piece.kind !== 'item') {
+      const vk = voiceKey(f.piece, gd);
+      if (vk) audio.voice(vk, 'place');
     }
     // accepted: the piece stays on the tile until m.private shows it there (or a short grace passes)
     setTimeout(() => { if (heldRef.current.has(f.uid)) releaseHold(f.uid); }, 1500);
@@ -1274,7 +1275,7 @@ function MatchScreen() {
   // bonds this mode never activates (标准: 10 of 23, 奥术 among them) — shown 本局禁用 on cards, chips and the popup
   const offBonds = modeOffBonds(getMode(pub?.modeId));
 
-  return html`<div class=${cx('screen', 'gm', `gm--${mode}`, drag && 'is-dragging', collapsed && 'is-collapsed', sp && 'has-sp', pen && 'is-pen', readyWhy && 'has-readywhy')}
+  return html`<div class=${cx('screen', 'gm', `gm--${mode}`, drag && 'is-dragging', collapsed && 'is-collapsed', sp && 'has-sp', pen && 'is-pen', readyWhy && 'has-readywhy', detail && 'has-dpanel')}
       data-camera=${pen ? 'pen' : camKind}>
     <div class="gm__field" ref=${hostRef} onContextMenu=${(e) => e.preventDefault()}></div>
     ${viewKind === 'loading' ? html`<div class="gm__loading"><${Spinner} label="LOADING FIELD" /></div>` : null}
@@ -1291,20 +1292,8 @@ function MatchScreen() {
         live=${liveLpNow} spectator=${spectator} />
 
       <div class="gm__bonds">
-        <button type="button" class="bonds-toggle" aria-expanded=${!bondsCollapsed} aria-controls="match-bond-strip"
-          aria-label=${bondsCollapsed ? '展开盟约' : '收起盟约'} title=${bondsCollapsed ? '展开盟约' : '收起盟约'}
-          onKeyDown=${(e) => {
-            // Keep native Space activation here without also firing the global ready / pause shortcut.
-            if (e.key === ' ') e.stopPropagation();
-          }}
-          onClick=${() => {
-            if (!bondsCollapsed && bondOpen?.from === 'strip') setBondOpen(null);
-            setBondsCollapsed(!bondsCollapsed);
-          }}><${Icon} name=${bondsCollapsed ? 'chevronRight' : 'chevronLeft'} /><span>${bondsCollapsed ? '盟约' : '收起'}</span></button>
-        <div id="match-bond-strip" class="gm__bond-list" hidden=${bondsCollapsed}>
-          <${BondStrip} bonds=${stripBonds} layersDisabled=${layersDisabled} openId=${bondPop && bondPop.ownerId === strip.ownerId ? bondPop.bondId : null}
-            owner=${strip.name} onOpen=${(id) => openBond(id, strip.ownerId, 'strip')} />
-        </div>
+        <${BondStrip} bonds=${stripBonds} layersDisabled=${layersDisabled} openId=${bondPop && bondPop.ownerId === strip.ownerId ? bondPop.bondId : null}
+          owner=${strip.name} onOpen=${(id) => openBond(id, strip.ownerId, 'strip')} />
       </div>
 
       <${TeamPanel} pub=${pub} myId=${myId} watching=${watchingNow} bubbles=${bubbles} onWatch=${watchPlayer} cap=${gd.config?.lpCapPerRound ?? 10} uniteLocal=${uniteLocal}
@@ -1357,7 +1346,7 @@ function MatchScreen() {
         onClose=${() => setBondOpen(null)} onMember=${(id, items) => setDetail({ kind: 'chess', id, owner: bondPop.ownerId, items: items || null })} />` : null}
 
       ${resolved ? html`<${DetailPanel} detail=${resolved} snapHp=${snapHp} onClose=${() => { setDetail(null); setSel(null); }}
-        bonds=${detailBonds} offBonds=${offBonds} loadout=${detailLoadout} side=${dSide} shopOpen=${shopOpen} live=${liveStats} voice=${combat}
+        bonds=${detailBonds} offBonds=${offBonds} loadout=${detailLoadout} side=${dSide} shopOpen=${shopOpen} live=${liveStats} voice=${true}
         onBond=${(id) => openBond(id, detailOwner, 'detail')} />` : null}
 
       ${selEntry && editable && !facing && !drag && showPrep ? html`<${Underframe} key=${sel.uid} view=${view} uid=${sel.uid}

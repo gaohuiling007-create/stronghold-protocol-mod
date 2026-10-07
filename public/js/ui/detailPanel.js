@@ -5,9 +5,7 @@
 // modeOffBonds; a bond its 变形同构体 pairing grants (gameLogic pieceBondIds: its piece's items, a teammate's unit:
 // UnitInfo `items`, a bond popup's 同构 row: the wearer's) has a dashed chip tagged 同构 — the wearer counts for it);
 // right under the header the operator's own effect (特质 —
-// garrison: type chip (its official type icon + eventTypeDesc such as 整备能力, garrisonTypeIconKey) + the description of
-// EVERY entry in `garrisonIds` — one block per run of the same type, a row per entry (an operator with several 特质 otherwise
-// showed only the first), see GarrisonBlock;
+// garrison: type chip (its official type icon + eventTypeDesc such as 整备能力, garrisonTypeIconKey) + description,
 // compact, visible without scrolling: user playtest #3 items 8 / 9), the class trait (特性), stats + range mini-map, skill (the one chosen in the loadout, DESIGN §16: icon, SP
 // info, rich description, 已调配 when not the default), elite module (模组: official type icon from the local-client
 // art, else its letter), equipped items (read-only from those `items` when the card has no own piece), talents
@@ -101,8 +99,26 @@ export function RangeGrid({ grid, class: cls }) {
   return html`<div class=${cx('rgrid', cls)} style=${rangeGridStyle(box)} aria-label="攻击范围">${cells}</div>`;
 }
 
+const STAT_SHORT = {
+  '生命上限': '生命',
+  '法术抗性': '法抗',
+  '攻击间隔': '间隔',
+  '阻挡数': '阻挡',
+  '部署费用': '费用',
+  '再部署': '再部署',
+  '移动速度': '移速',
+  '攻击': '攻击',
+  '防御': '防御',
+  '目标价值': '价值',
+};
+
 function Stat({ k, v, sub, tone = null, title }) {
-  return html`<div class=${cx('dstat', tone && `is-${tone}`)} title=${title}><span class="dstat__k">${k}</span><span class="dstat__row"><b class="dstat__v num">${v}</b>${sub ? html`<small>${sub}</small>` : null}</span></div>`;
+  const shortK = STAT_SHORT[k] || k;
+  const fullTitle = title ? (k !== shortK ? `${k}（${title}）` : title) : k;
+  // The cell's text is always the full label — views and tests key stats by it. On a phone the label
+  // is too wide for the fixed cell at the readable floor, so CSS swaps in the short form from
+  // data-short; the hidden span still counts as this node's text, which is what keeps both true.
+  return html`<div class=${cx('dstat', tone && `is-${tone}`)} title=${fullTitle} aria-label=${k}><span class="dstat__k" data-short=${shortK}><span class="dstat__k-full">${k}</span></span><span class="dstat__row"><b class="dstat__v num">${v}</b>${sub ? html`<small>${sub}</small>` : null}</span></div>`;
 }
 
 /** Tolerance below which a live stat counts as its base (display rounding). */
@@ -305,52 +321,9 @@ export function garrisonTypeIconKey(garrison) {
   return EVENT_ICON[garrison?.eventType] || 's_icon_bond';
 }
 
-/**
- * The 特质 records to DISPLAY for a list of `garrisonIds` (research 03 operators.json meta: "garrisons[0] is the displayed
- * 特质 text; further entries are implementation components (apply all, display first). Markers like 【145】 in component
- * text = internal reference to parent garrison id; ignore.").
- *
- * A record whose text OPENS with 【N】 is such a component of garrison N: it is applied by the sim but never shown, because
- * the parent's own sentence already states the effect — 耀骑士临光's 【145】 parts repeat / subdivide garrison_145_a's line,
- * 伺夜's 【152】 duplicates its parent word for word, 圣约送葬人's 【23】 restates garrison_55_a's.
- *
- * Everything else is kept, in data order. A shared component that is not marked stays visible: 伺夜's garrison_01_a is the
- * same 弱点伤害 line as his garrison_152_a, and 圣约送葬人's garrison_55_a states the 【远见】每场战斗至多21层 cap its
- * parent does not — the line tells the player something either way, so it is not this function's call to hide it.
- * @param {any[]} list garrison records (garrisonIds order, already resolved)
- * @returns {any[]}
- */
-export function garrisonDisplayList(list) {
-  return (Array.isArray(list) ? list : (list ? [list] : []))
-    .filter(Boolean)
-    .filter((g) => !/^\s*【\d+】/.test(String(g.descRaw || g.desc || '')));
-}
-
-/**
- * The operator's own effects (特质, garrisons.json): one type chip + the description of every entry, compact.
- *
- * `garrisonIds` is a LIST and the order is meaningful (data), but the card used to draw only `[0]` — so an operator with
- * several silently lost the rest: 结城理's kill adder (击杀 →【精准】+2, with its per-round cap) never reached the screen,
- * and 耀骑士临光 (4), 伺夜 (3) and 11 more lost entries too. Consecutive entries of the SAME official type share one chip
- * (结城理's three are all 战斗中的 持续叠加); a different type opens another block, so an operator with a 整备 + a 战斗
- * 特质 still shows both chips. Components are dropped (garrisonDisplayList).
- */
-function GarrisonBlock({ garrisons, m }) {
-  const all = (Array.isArray(garrisons) ? garrisons : (garrisons ? [garrisons] : [])).filter(Boolean);
-  const list = garrisonDisplayList(all);
-  if (!list.length) return null;
-  const rows = (a) => (a.length === 1
-    ? html`<${RichText} as="p" text=${a[0].descRaw || a[0].desc} class="dgarrison__text" />`
-    : html`<ul class="dgarrison__texts">${a.map((g, i) => html`<li key=${i}><${RichText} text=${g.descRaw || g.desc} /></li>`)}</ul>`);
-  const out = [];
-  for (const g of list) {
-    const prev = out[out.length - 1];
-    if (prev && prev.garrison.eventType === g.eventType) prev.rest.push(g);
-    else out.push({ garrison: g, rest: [g] });
-  }
-  return html`${out.map(({ garrison, rest }, gi) => html`<section key=${gi} class="dgarrison" aria-label="特质"
-      data-garrison=${rest.map((g) => g.garrisonId || '').filter(Boolean).join(' ')}
-      data-garrison-all=${gi === 0 ? all.map((g) => g.garrisonId || '').filter(Boolean).join(' ') : null}>
+/** The operator's own effect (特质, garrisons.json): trigger chip + description, compact. */
+function GarrisonBlock({ garrison, m }) {
+  return html`<section class="dgarrison" aria-label="特质" data-garrison=${garrison.garrisonId || ''}>
     <div class="dgarrison__head">
       <span class="dgarrison__k">特质</span>
       <span class="dgarrison__type">
@@ -358,8 +331,8 @@ function GarrisonBlock({ garrisons, m }) {
         ${garrison.eventTypeDesc || ''}
       </span>
     </div>
-    ${rows(rest)}
-  </section>`)}`;
+    <${RichText} as="p" text=${garrison.descRaw || garrison.desc} class="dgarrison__text" />
+  </section>`;
 }
 
 /** The talents the card lists (天赋): the loadout record's named, not hidden ones. */
@@ -384,21 +357,16 @@ export function chessStatsBlock({ rec, chess, live = null }) {
     res: liveStat(live, 'res', s.res ?? 0, fmtRes), interval: liveStat(live, 'interval', interval, fmtInterval),
     blockCnt: liveStat(live, 'blockCnt', s.blockCnt, (v) => String(v)),
   };
-  // 对空 (shared/protocol.js unitStatsEntry): 可对空 rides the ATTACK (the profile's own bit — 优先攻击空中单位, a ranged
-  // attacker, or the 化鲲为鹏 retype); an airborne (起飞) unit's 阻挡 is what reads 对空 instead — it drops the ground block
-  // and blocks air (sim buffs.js `liftoff` / `blockFly`). The record is the fallback while no live entry is up.
-  const canHitFly = !!(live ? live.canHitFly : rec?.canHitFly);
-  const lift = !!(live && live.liftoff);
   return html`
     <div key="stats" class=${cx('dstats-wrap', live && 'is-live')} data-live=${live ? live.src || 'prep' : undefined}>
       <div class="dstats">
         <${LiveTag} live=${live} />
         <${Stat} k="生命上限" ...${st.maxHp} />
-        <${Stat} k="攻击" ...${st.atk} sub=${canHitFly ? `${st.atk.sub ? `${st.atk.sub} ` : ''}（可对空）` : st.atk.sub} />
+        <${Stat} k="攻击" ...${st.atk} />
         <${Stat} k="防御" ...${st.def} />
         <${Stat} k="法术抗性" ...${st.res} />
         <${Stat} k="攻击间隔" ...${st.interval} />
-        <${Stat} k="阻挡数" ...${st.blockCnt} sub=${lift ? '（对空）' : st.blockCnt.sub} />
+        <${Stat} k="阻挡数" ...${st.blockCnt} />
         <${Stat} k="部署费用" v=${s.cost ?? '—'} />
         <${Stat} k="再部署" v=${s.respawnTime != null ? `${s.respawnTime}s` : '—'} />
       </div>
@@ -418,8 +386,7 @@ export function ChessDetail({ chess, piece, unit, snapHp, editable, onSell, bond
   // a chosen skill the manifest has no icon for (only the default skills' icons are fetched): its slot letter
   const skIcon = sk && lo && !lo.defaultSkill ? skillRecordIconUrl(m, sk, { empty: false }) : skillIconUrl(m, c);
   const skSlot = sk && Number.isInteger(sk.index) ? `S${sk.index + 1}` : null;
-  // EVERY 特质 the operator carries, in data order (the card used to read only garrisonIds[0] — 结城理 lost his kill adder)
-  const garrisons = (Array.isArray(c.garrisonIds) ? c.garrisonIds : []).map((id) => data.lookup('garrisons', id)).filter(Boolean);
+  const garrison = Array.isArray(c.garrisonIds) && c.garrisonIds[0] ? data.lookup('garrisons', c.garrisonIds[0]) : null;
   const items = Array.isArray(piece?.items) ? piece.items : [];
   // the bonds the unit counts for: its own + a 变形同构体 pairing's (its piece's items; without one: `unitItems` — a
   // teammate's unit's UnitInfo items, a bond popup 同构 row's wearer's)
@@ -454,7 +421,7 @@ export function ChessDetail({ chess, piece, unit, snapHp, editable, onSell, bond
         <${BondChips} bondIds=${bondIds} bonds=${bonds} off=${offBonds} onBond=${onBond} granted=${grantedIds} />
       </div>
     </div>`;
-  blocks.garrison = garrisons.length ? html`<${GarrisonBlock} key="garrison" garrisons=${garrisons} m=${m} />` : null;
+  blocks.garrison = garrison ? html`<${GarrisonBlock} key="garrison" garrison=${garrison} m=${m} />` : null;
   blocks.trait = c.trait?.desc ? html`<p key="trait" class="dtrait"><${Icon} name="info" /><${RichText} text=${traitText(c, golden, lo)} /></p>` : null;
   blocks.stats = chessStatsBlock({ rec: fr, chess: c, live });
   blocks.skill = sk ? html`<${Section} key="skill" title="技能" micro="SKILL" class="dsec--skill">
@@ -654,35 +621,12 @@ export function TokenDetail({ token, piece, ownerId = null, snapHp = null, live 
 }
 
 /**
- * A special terrain tile's tip (GitHub issue #184: 「建议加入对于特殊地形的单击信息提示」). Opened by a tap on the tile
- * itself — the game screen resolves it with `gameLogic.terrainInfo` from the stage the board on screen is built from, so
- * the mechanism lines carry that stage's own numbers (活性源石's damage / duration, 沼泽's stacks, 深水区's drowning …).
- * @param {{ name:string, tag:string, lines:string[], facts:string[], row:number, col:number }} terrain
- */
-function TerrainDetail({ terrain }) {
-  return html`
-    <div class="dhead">
-      <div class="dhead__icon"><${Icon} name="info" /></div>
-      <div class="dhead__info">
-        <div class="dhead__chips"><span class="dtag-kind">${terrain.tag}</span></div>
-        <h3 class="dhead__name">${terrain.name}</h3>
-      </div>
-    </div>
-    <${Section} title="地形机制" micro="TERRAIN">
-      ${terrain.lines.map((t, i) => html`<p class="dtext" key=${i}>${t}</p>`)}
-    <//>
-    ${Array.isArray(terrain.facts) && terrain.facts.length ? html`<${Section} title="这一格"><p class="dtext">${terrain.facts.join(' · ')}</p><//>` : null}`;
-}
-
-/**
  * Resolve what a detail target shows.
- * @param {{ kind:'piece'|'chess'|'item'|'enemy'|'unit'|'token'|'terrain', id?:string, uid?:number, unit?:any, count?:number }} target
+ * @param {{ kind:'piece'|'chess'|'item'|'enemy'|'unit'|'token', id?:string, uid?:number, unit?:any, count?:number }} target
  * @param {Map<number, any>} pieces indexPieces(priv)
  */
 export function resolveDetail(target, pieces) {
   if (!target) return null;
-  // a special terrain tile (issue #184): the screen resolved the stage's own numbers already (gameLogic.terrainInfo)
-  if (target.kind === 'terrain') return target.terrain && typeof target.terrain === 'object' ? { type: 'terrain', terrain: target.terrain } : null;
   if (target.kind === 'piece') {
     const e = pieces?.get(target.uid);
     if (!e) return null;
@@ -727,16 +671,13 @@ export function resolveDetail(target, pieces) {
  *   = the defaults
  *   live: the unit's live stats (unitStatsEntry + src 'battle' | 'prep') — an object, or a getter the panel re-reads 4×
  *   a second (the battle's own sim, battle/runner.js unitStats); null ⇒ the record's numbers
- *   voice: whether the panel may speak — 选中干员 (audio.voice 'select') plays only while a battle runs (user request:
- *   整备期不播干员语音), so the game screen passes its combat flag
  */
-export function DetailPanel({ detail, editable, snapHp, onClose, onSell, onDestroy, bonds = [], offBonds = null, loadout = null, onBond = null, side = 'left', shopOpen = false, live = null, voice = false }) {
+export function DetailPanel({ detail, editable, snapHp, onClose, onSell, onDestroy, bonds = [], offBonds = null, loadout = null, onBond = null, side = 'left', shopOpen = false, live = null, voice = true }) {
   const getter = typeof live === 'function' ? live : null;
   useTicker(detail && getter ? 250 : 0);
-  // 选中干员 voice (audio.voice 'select'): once per opened operator — the panel stays mounted while the target changes,
-  // so the key carries what identifies it (its chess record and its piece / battle unit id)
-  const selectKey = voice && detail?.type === 'chess' ? `${detail.chess?.chessId || ''}:${detail.unitId ?? detail.piece?.uid ?? ''}` : null;
-  const selectChar = voice && detail?.type === 'chess' ? detail.chess?.charId || null : null;
+  const isOwnedOrDeployed = Boolean(detail?.piece || detail?.unitId);
+  const selectKey = voice && isOwnedOrDeployed && detail?.type === 'chess' ? `${detail.chess?.chessId || ''}:${detail.unitId ?? detail.piece?.uid ?? ''}` : null;
+  const selectChar = voice && isOwnedOrDeployed && detail?.type === 'chess' ? detail.chess?.charId || null : null;
   useEffect(() => {
     if (selectKey && selectChar) audio.voice(selectChar, 'select');
   }, [selectKey, selectChar]);
@@ -764,7 +705,6 @@ export function DetailPanel({ detail, editable, snapHp, onClose, onSell, onDestr
       ${detail.type === 'item' ? html`<${ItemDetail} item=${detail.item} piece=${detail.piece} editable=${editable} onDestroy=${destroyIt} offBonds=${offBonds} />` : null}
       ${detail.type === 'enemy' ? html`<${EnemyDetail} enemy=${detail.enemy} snapHp=${snapHp} count=${detail.count} live=${liveNow} />` : null}
       ${detail.type === 'token' ? html`<${TokenDetail} token=${detail.token} piece=${detail.piece} ownerId=${detail.ownerId ?? null} snapHp=${snapHp} live=${liveNow} />` : null}
-      ${detail.type === 'terrain' ? html`<${TerrainDetail} terrain=${detail.terrain} />` : null}
     </div>
   </aside>`;
 }
