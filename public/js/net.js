@@ -97,14 +97,7 @@ export function backoffDelay(attempt, rand = Math.random) {
  * @returns {string}
  */
 export function defaultWsUrl(loc = globalThis.location) {
-  try {
-    const override = globalThis.localStorage?.getItem('sp_ws_url') || (new URLSearchParams(loc?.search || '')).get('ws');
-    if (override) return override;
-  } catch {}
   if (!loc || !loc.host) return 'ws://localhost:3000/ws';
-  if (loc.host.endsWith('.pages.dev')) {
-    return 'wss://stronghold-protocol-see7.onrender.com/ws';
-  }
   return `${loc.protocol === 'https:' ? 'wss' : 'ws'}://${loc.host}/ws`;
 }
 

@@ -162,6 +162,11 @@
 .dgarrison__type { display: inline-flex; align-items: center; gap: .04rem; font-size: .12rem; line-height: 1.5; color: var(--gold-2); padding: 0 .07rem 0 .03rem; border: 1px solid rgba(242, 189, 62, .4); }
 .dgarrison__icon { width: .18rem; height: .18rem; object-fit: contain; }
 .dgarrison__text { font-size: .15rem; line-height: 1.55; color: var(--text-hi); }
+/* an operator with SEVERAL 特质 (garrisonIds): one block, one type chip, a row per entry — 结城理 has 3 (切换 / 击杀 /
+   治疗), 耀骑士临光 4. The 1st is the .dgarrison__text above; the rest are the list (same size, slightly dimmed). */
+.dgarrison__texts { display: flex; flex-direction: column; gap: .03rem; margin: 0; padding: 0; list-style: none; }
+.dgarrison__texts > li { font-size: .15rem; line-height: 1.55; color: var(--text-hi); }
+.dgarrison__texts > li + li { padding-top: .03rem; border-top: 1px solid rgba(242, 189, 62, .16); }
 .dbonds { display: flex; flex-wrap: wrap; gap: .08rem; }
 .dbond { display: inline-flex; align-items: center; gap: .05rem; padding: .03rem .1rem .03rem .05rem; font-size: .15rem; background: rgba(78, 216, 175, .08); border: 1px solid var(--mint-800); color: var(--mint-400); }
 /* the unit's bonds in the header's right column, right under name / class (user playtest #2 item 9): icon, name,
@@ -587,7 +592,7 @@ button.bpop__harmony:hover { border-style: solid; color: #fff; }
 .uframe__btn:hover:not(:disabled) .uframe__glyph { background: #ff4a2b; }
 .uframe__btn:hover:not(:disabled) .uframe__plate { filter: brightness(1.12) drop-shadow(0 0 .08rem rgba(255, 198, 90, .7)); }
 .uframe__btn--destroy:hover:not(:disabled) .uframe__plate { filter: brightness(1.12) drop-shadow(0 0 .08rem rgba(255, 90, 60, .7)); }
-.uframe__label { font-size: .14rem; font-weight: 700; letter-spacing: .12em; padding: 0 .06rem; background: rgba(8, 11, 10, .82); text-shadow: 0 1px 2px #000; }
+.uframe__label { font-size: .14rem; font-weight: 700; letter-spacing: .12em; white-space: nowrap; padding: 0 .06rem; background: rgba(8, 11, 10, .82); text-shadow: 0 1px 2px #000; }
 .uframe__btn--sell .uframe__label { color: #ffd98a; }
 .uframe__price { position: absolute; right: -.12rem; top: -.06rem; --hex-h: .24rem; }
 

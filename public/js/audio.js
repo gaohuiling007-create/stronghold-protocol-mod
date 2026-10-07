@@ -49,15 +49,22 @@
 import { PHASE } from '../../shared/constants.js';
 import { mediaUrl } from './media.js';
 
-const isMobile = typeof navigator !== 'undefined' && (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && !globalThis.matchMedia?.('(pointer: fine)').matches));
-
 const MAX_VOICES = 8;
 const UNIT_COOLDOWN_MS = 160;
 const URL_GAP_MS = 45;
 const MAX_PER_URL = 2;
-const BUFFER_CACHE = isMobile ? 60 : 180;
+/**
+ * 漏怪: the original Arknights exit alarm (`sfx.battle.leak`, `battle/b_ui/b_ui_alarmenter`) runs **1.44 s**, and the
+ * official bank is a one-shot: `battle.ON_ENEMY_REACHED_EXIT` carries `maxSoundAllowed: 1` with `popOldest: true` on the
+ * `Battle_UI_Important` mixer, i.e. **never two at once** (a new escape replaces the one still ringing). We keep the
+ * "never two at once" half and leave the rest of the cue alone: leaks closer together than the cue is long are the same
+ * disaster and share one alarm, so a line that breaks costs one clear ring per 1.5 s instead of a stutter of restarts.
+ * (The SFX limiter still applies on top.)
+ */
+const LEAK_SFX_GAP_MS = 1500;
+const BUFFER_CACHE = 180;
 /** Decoded-PCM budget of the buffer cache beside its entry count: a voice line decodes to 0.4–1.3 MB (see _buffer). */
-const BUFFER_BYTES = isMobile ? 24 * 1024 * 1024 : 64 * 1024 * 1024;
+const BUFFER_BYTES = 64 * 1024 * 1024;
 const XFADE_S = 1;
 const FADE_S = 0.8;
 /** Voice: shortest gap between two lines, and the crossfade of a higher-priority line taking the channel (official 0.1 s). */
@@ -281,35 +288,28 @@ export function resultVoiceSlot(o = {}) {
  * to be looking at (review on #73): reading the tracked units of the field on screen made a teammate's operator say the
  * viewer's 作战结束 line while the viewer was watching them.
  * `pp` is that battle's own `perPlayer` entry (BattleResult, sim/Battle.js): `unitsEnd` lists what stood on its field
- * when the battle ended, `defId` being an operator (`char_*`) or a summon piece (`token_*`, which does not talk).
+ * when the battle ended. Its `defId` names the CHESS (`chess_char_*`) or a summon piece (`token_*`, which does not talk);
+ * the voice bank belongs to the operator (`char_*`), so `charOf` maps a chess id to its charId (the chess record's
+ * `charId`). Without it only ids that already are a charId count — a real result then has no speaker, which is how the
+ * line stayed silent in every battle until 0.1.4's fix.
  * Survivors speak first — the line reports how the battle went, and a wiped-out squad is the only case where a fallen
  * operator ends up saying it. Ties are drawn like every other unit sound.
  * @param {{ unitsEnd?: Array<{ defId?: string|null, alive?: boolean }> } | null | undefined} pp that battle's perPlayer
  * @param {() => number} [random]
+ * @param {((defId: string) => string|null|undefined) | null} [charOf] chess id → charId
  * @returns {string|null} charId, or null when that battle fielded no operator at all
  */
-export function resultSpeaker(pp, random = Math.random) {
+export function resultSpeaker(pp, random = Math.random, charOf = null) {
   const ops = [];
   for (const u of Array.isArray(pp?.unitsEnd) ? pp.unitsEnd : []) {
-    if (u && typeof u.defId === 'string' && u.defId.startsWith('char_')) ops.push({ id: u.defId, alive: !!u.alive });
+    if (!u || typeof u.defId !== 'string') continue;
+    const id = u.defId.startsWith('char_') ? u.defId : charOf ? charOf(u.defId) : null;
+    if (typeof id === 'string' && id.startsWith('char_')) ops.push({ id, alive: !!u.alive });
   }
   const standing = ops.filter((o) => o.alive);
   const pool = standing.length ? standing : ops;   // only a wiped-out squad is spoken for by a fallen operator
   if (!pool.length) return null;
   return pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))].id;
-}
-
-
-export function voiceKey(x, gd = null) {
-  if (!x) return null;
-  if (typeof x === 'string') {
-    if (x.startsWith('char_')) return x;
-    const getFn = gd?.getChess || gd?.chess || (typeof gd === 'function' ? gd : null);
-    const rec = getFn ? getFn(x) : null;
-    return rec?.charId || null;
-  }
-  if (x.piece) return voiceKey(x.piece, gd);
-  return x.charId || voiceKey(x.id || x.chessId || x.defId || x.def || x.spine, gd) || null;
 }
 
 /** Concurrency + cooldown gate for battle SFX. Pure (time is passed in). */
@@ -450,8 +450,6 @@ export class AudioManager {
     this.sfxGain = null;
     this.voiceGain = null;
     this.volumes = { bgm: 0.6, sfx: 0.8, voice: 0.8, muted: false };
-    this.voiceLang = 'jp';
-    this._duckTimer = null;
     this.buffers = new Map(); // url → Promise<AudioBuffer|null> (insertion order = LRU)
     this.bufBytes = new Map(); // url → decoded PCM bytes (the byte budget of the LRU, see _buffer)
     this.warned = new Set();
@@ -595,36 +593,7 @@ export class AudioManager {
       voice: n(v?.voice, this.volumes.voice),
       muted: typeof v?.muted === 'boolean' ? v.muted : this.volumes.muted,
     };
-    if (typeof v?.voiceLang === 'string' && (v.voiceLang === 'jp' || v.voiceLang === 'cn')) {
-      this.voiceLang = v.voiceLang;
-    }
     this._applyVolumes();
-  }
-
-  setVoiceLang(lang) {
-    if (lang === 'jp' || lang === 'cn') {
-      this.voiceLang = lang;
-    }
-  }
-
-  /**
-   * Temporarily duck BGM volume to make voice lines pop (~0.35 volume for durationMs, then restore).
-   */
-  duckBgm(durationMs = 1800) {
-    if (!this.ctx || !this.bgmGain) return;
-    try {
-      const t = this.ctx.currentTime;
-      const normal = this.volumes.bgm ** 2 * 0.55;
-      const ducked = normal * 0.35;
-      this.bgmGain.gain.setTargetAtTime(ducked, t, 0.08);
-      clearTimeout(this._duckTimer);
-      this._duckTimer = setTimeout(() => {
-        if (this.ctx && this.bgmGain) {
-          const t2 = this.ctx.currentTime;
-          this.bgmGain.gain.setTargetAtTime(this.volumes.bgm ** 2 * 0.55, t2, 0.3);
-        }
-      }, durationMs);
-    } catch { /* ignore */ }
   }
 
   _applyVolumes() {
@@ -829,15 +798,6 @@ export class AudioManager {
   }
 
   /**
-   * Allied unit deployment SFX (e.g. from render unitDeploy).
-   */
-  deploy(e, gd) {
-    try {
-      this.battle('deploy');
-    } catch { /* ignore */ }
-  }
-
-  /**
    * Per-unit sound (attack/hit/skill/die/born), throttled.
    * @param {string} defId charId/tokenId/enemyId (or chess id — mapped via its spine/char id by the caller)
    * @param {'attack'|'hit'|'skill'|'die'|'born'} kind
@@ -863,34 +823,20 @@ export class AudioManager {
   // ---- operator battle voice ----------------------------------------------------------------------------------
 
   /**
-   * Play an operator's voice line (`audio.voice[charId][slot]`; a slot with several lines draws one at random).
-   * Supports both battle events and interactive phase (deployment, selection, skill, victory settlement).
-   * The line must pass VoiceGate: one at a time, a global gap, a per-unit cooldown, higher priority wins.
+   * Play an operator's battle line (`audio.voice[charId][slot]`; a slot with several lines draws one at random).
+   * Only in battle: every caller is a running battle's own event stream or its settlement (user request — the 休整期
+   * is silent). The line must pass VoiceGate: one at a time, a global gap, a per-unit cooldown, higher priority wins.
    * @param {string} charId e.g. 'char_263_skadi'
    * @param {'start'|'faceEnemy'|'select'|'place'|'skill1'|'skill2'|'skill3'|'skill4'|'squad'|'squadFirst'
-   *   |'resultFour'|'resultThree'|'resultTwo'|'resultLose'|'gacha'} [slot] defaults to 'place'
+   *   |'resultFour'|'resultThree'|'resultTwo'|'resultLose'|'gacha'} slot
    * @param {{ unitKey?: string|number|null, volume?: number }} [o] `unitKey` = the cooldown key (a battle unit id)
    * @returns {boolean} whether such a line exists and started
    */
-  voice(charId, slot = 'place', o = {}) {
+  voice(charId, slot, o = {}) {
     try {
       if (!this.ctx || !this.voiceGain || this.volumes.muted || this.volumes.voice <= 0) return false;
-      if (typeof slot === 'object' && slot !== null) { o = slot; slot = 'place'; }
-      if (!slot || typeof slot !== 'string') slot = 'place';
-      if (!charId) return false;
-      const realCharId = typeof charId === 'string' && charId.startsWith('char_') ? charId : voiceKey(charId);
-      if (!realCharId) return false;
-      if (this.voiceNode && this.voiceNode.charId === realCharId) return false;
-      const m = this.getManifest();
-      const vRoot = m?.audio?.voice;
-      const curLang = this.voiceLang || 'jp';
-      const altLang = curLang === 'jp' ? 'cn' : 'jp';
-      let line = null;
-      if (vRoot?.[curLang]?.[realCharId]?.[slot]) line = vRoot[curLang][realCharId][slot];
-      else if (vRoot?.[altLang]?.[realCharId]?.[slot]) line = vRoot[altLang][realCharId][slot];
-      else if (vRoot?.[realCharId]?.[slot]) line = vRoot[realCharId][slot];
-      else if (vRoot?.[realCharId]) line = vRoot[realCharId];
-      else if (m?.chars?.[realCharId]?.voice) line = m.chars[realCharId].voice;
+      if (typeof charId !== 'string' || typeof slot !== 'string') return false;
+      const line = this.getManifest()?.audio?.voice?.[charId]?.[slot];
       const url = Array.isArray(line) ? line[Math.floor(Math.random() * line.length)] : line;
       if (typeof url !== 'string' || !url) return false;
       const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -899,13 +845,13 @@ export class AudioManager {
       if (verdict === 'preempt') this._stopVoice();
       this.voiceGate.start(slot, o.unitKey ?? null, now);
       const token = ++this.voiceToken;
-      this._playVoice(url, token, o.volume, realCharId);
+      this._playVoice(url, token, o.volume);
       return true;
     } catch (err) { this._warn('voice', err); return false; }
   }
 
   /** Fetch/decode and start one voice line through the voice channel. */
-  _playVoice(url, token, volume, charId = null) {
+  _playVoice(url, token, volume) {
     // `token` is the line's own `voiceToken`. Every deferred step below — the decode, a failed fetch, `onended` and the
     // safety timer — can land AFTER this line was taken over or stopped: `voiceToken` has moved on and the channel then
     // belongs to the line that replaced it. So each step re-checks its token and, when it is stale, touches NOTHING:
@@ -921,7 +867,7 @@ export class AudioManager {
         const gain = this.ctx.createGain();
         gain.gain.value = Math.max(0, Math.min(1.5, Number.isFinite(volume) ? volume : 1));
         src.connect(gain); gain.connect(this.voiceGain);
-        const node = { src, gain, url, token, charId };
+        const node = { src, gain, url, token };
         let done = false;
         const end = () => {
           if (done) return;
@@ -938,7 +884,6 @@ export class AudioManager {
         setTimeout(end, (buf.duration + 0.3) * 1000); // safety if onended never fires
         src.start();
         this.voiceNode = node;
-        this.duckBgm(1800);
       } catch (err) {
         this._warn('voice-play', err);
         if (token === this.voiceToken) this.voiceGate.release();
@@ -1041,22 +986,31 @@ export class AudioManager {
           const mix = own ? m.audio.sfx.units[u.def].mix?.die : null;
           if (!unitSoundPlays(mix, this.random())) continue;
           this._playUnitUrl(url, own ? `${e[1]}:die` : `die:${e[1]}`, own ? unitGain(0.8, mix) : 0.7);
+        } else if (kind === 'leak') {
+          // 漏怪: an enemy reached its goal (Battle.leak emits the sim's own EV.LEAK — it is NOT a `die`, so until now a
+          // leak was completely silent, for the player's own field and for a 联防 the helpers could not hold alike).
+          // The cue is the ORIGINAL Arknights stage alarm — the one an enemy entering the exit plays in any normal
+          // stage (manifest `sfx.battle.leak`, bank battle.ON_ENEMY_REACHED_EXIT, file b_ui_alarmenter).
+          // `LEAK_SFX_GAP_MS` keeps it to one alarm at a time (the official bank's own maxSoundAllowed 1).
+          if (now - (this.lastLeakSfxAt ?? -Infinity) < LEAK_SFX_GAP_MS) continue;
+          if (typeof this.getManifest()?.audio?.sfx?.battle?.leak !== 'string') continue;
+          this.lastLeakSfxAt = now;
+          this.battle('leak', { unitKey: 'leak', volume: 0.85 });
         } else if (kind === 'deploy') {
           const u = this.units.get(e[1]);
           if (!u || u.side === 'enemy') continue;
-          const isInitial = !!(e[2]?.initial || (typeof e[2] === 'object' && e[2]?.initial));
           const m = this.getManifest();
           const url = deploySfxUrl(m, u);
           // 行动出发 / 部署: the first operator of the battle says the battle-start line, the others their deploy line
           // (a knocked-out operator redeploying in the same battle is one of the others; a summon says nothing).
-          // 初始批量部署 (initial) 时，只有首位干员说 start，其余干员不开局齐声喊 place 台词
+          // Kept ahead of the deploy-SFX guards below: the voice channel is independent of the unit sound's roll.
           if (unitSoundClass(u) === 'char') {
             if (!this.startVoiceDone) {
               this.startVoiceDone = true;
               if (!this.voice(u.def, 'start')) this.voice(u.def, 'place', { unitKey: e[1] });
-            } else if (!isInitial) this.voice(u.def, 'place', { unitKey: e[1] });
+            } else this.voice(u.def, 'place', { unitKey: e[1] });
           }
-          if (!url || isInitial) continue;
+          if (!url) continue;
           const own = url === m?.audio?.sfx?.units?.[u.def]?.born;
           const mix = own ? m.audio.sfx.units[u.def].mix?.born : null;
           if (!unitSoundPlays(mix, this.random())) continue;
